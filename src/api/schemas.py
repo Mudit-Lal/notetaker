@@ -2,7 +2,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-from src.db.models import LifeDomain, NoteSource
+from src.db.models import LifeDomain, NoteSource, TodoPriority, TodoStatus
 
 
 class NoteCreate(BaseModel):
@@ -91,3 +91,42 @@ class TagTreeResponse(BaseModel):
 
 class MessageResponse(BaseModel):
     message: str
+
+
+# --- Todos ---
+
+
+class TodoCreate(BaseModel):
+    text: str = Field(..., min_length=1, max_length=5000)
+    priority: TodoPriority = TodoPriority.MEDIUM
+    domain: LifeDomain | None = None
+    tags: list[str] = Field(default_factory=list)
+    due_date: str | None = None
+
+
+class TodoUpdate(BaseModel):
+    text: str | None = None
+    priority: TodoPriority | None = None
+    domain: LifeDomain | None = None
+    tags: list[str] | None = None
+    due_date: str | None = None
+
+
+class TodoResponse(BaseModel):
+    id: int
+    text: str
+    status: TodoStatus
+    priority: TodoPriority
+    domain: LifeDomain
+    tags: list[str]
+    source_note_id: int | None
+    source: NoteSource
+    due_date: str | None
+    created_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None
+
+
+class TodosListResponse(BaseModel):
+    todos: list[TodoResponse]
+    total: int

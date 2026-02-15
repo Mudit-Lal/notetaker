@@ -9,7 +9,7 @@ import anthropic
 import openai
 
 from src.config import settings
-from src.db.models import LifeDomain, Note
+from src.db.models import LifeDomain, MessageType, Note, Todo, TodoPriority, TodoStatus
 
 if TYPE_CHECKING:
     from src.db.database import Database
@@ -17,16 +17,45 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-BASE_SYSTEM_PROMPT = """You are a personal note-taking assistant. You process voice and text notes
-from a user who takes DIVERSE notes across ALL areas of their life — work, personal, health,
-creative projects, finances, learning, social, and more.
+BASE_SYSTEM_PROMPT = """You are a personal note-taking and task management assistant. You process voice and text
+messages from a user who takes DIVERSE notes and gives task instructions across ALL areas of their life —
+work, personal, health, creative projects, finances, learning, social, and more.
 
-Your job is to analyze each note and return a JSON object with:
-- "summary": A concise 1-2 sentence summary of the note
+STEP 1 — CLASSIFY THE MESSAGE:
+Determine the "message_type" based on the user's INTENT:
+- "todo": The message is primarily about things to DO. Tasks, reminders, errands, things to follow up on.
+  Examples: "I need to call Bob tomorrow", "Pick up groceries", "Remind me to send the invoice",
+  "Book flights for Delhi trip", "Follow up with Kaizen Waste on the website mockups"
+- "note": The message is primarily informational — observations, thoughts, meeting summaries, ideas,
+  journal entries, reflections, learnings. No clear action needed.
+  Examples: "Had a great meeting with the DIVINI team today, they loved the packaging concepts",
+  "Thinking about the connection between Sharira Traya and modern psychology",
+  "Rida's birthday is Feb 3rd" (this is informational, not a task)
+- "note_with_todos": The message contains BOTH informational content AND embedded action items.
+  Examples: "Met with Kaizen Waste team — they want to revamp the website. I need to send them
+  the mockups by Friday and schedule a follow-up call", "Great gym session today, hit a PR on
+  deadlifts. Need to buy more protein powder and book next physio appointment"
+
+STEP 2 — RETURN JSON based on message_type:
+
+If message_type is "note" or "note_with_todos", include:
+- "summary": A concise 1-2 sentence summary of the note content
 - "tags": A list of relevant hierarchical tags (2-6 tags, lowercase, no #)
 - "domain": One of: work, personal, health, finance, creative, learning, social, other
-- "action_items": A list of any action items or todos mentioned (empty list if none)
 - "related_keywords": 3-5 keywords for finding related notes later
+
+If message_type is "todo" or "note_with_todos", include:
+- "todos": A list of todo objects, each with:
+  - "text": The actionable task, written as a clear imperative (e.g. "Send mockups to Kaizen Waste")
+  - "priority": "high", "medium", or "low" — infer from urgency/importance cues
+  - "due_date": A date string if mentioned or implied (e.g. "tomorrow", "Friday", "Feb 20"), or null
+
+If message_type is "todo" (pure task, no note), ALSO include:
+- "tags": Tags for the todo items (2-4 tags)
+- "domain": The life domain for the tasks
+
+ALWAYS include:
+- "message_type": one of "note", "todo", "note_with_todos"
 
 TAG FORMAT RULES:
 - Tags use slash-separated hierarchy: "parent/child" (max 2 levels)
@@ -106,8 +135,20 @@ class AIProcessor:
         )
         return transcript.strip()
 
-    def process_note(self, raw_text: str) -> dict:
-        """Use Claude to summarize, tag, and extract action items from a note."""
+    def _parse_json_response(self, response_text: str) -> dict | None:
+        """Extract and parse JSON from Claude's response."""
+        if "```json" in response_text:
+            response_text = response_text.split("```json")[1].split("```")[0]
+        elif "```" in response_text:
+            response_text = response_text.split("```")[1].split("```")[0]
+        try:
+            return json.loads(response_text.strip())
+        except json.JSONDecodeError:
+            logger.error("Failed to parse AI response: %s", response_text)
+            return None
+
+    def process_message(self, raw_text: str) -> dict:
+        """Use Claude to classify, summarize, tag, and extract todos from a message."""
         message = self.anthropic_client.messages.create(
             model="claude-sonnet-4-5-20250929",
             max_tokens=1024,
@@ -115,58 +156,129 @@ class AIProcessor:
             messages=[
                 {
                     "role": "user",
-                    "content": f"Process this note and return ONLY valid JSON:\n\n{raw_text}",
+                    "content": f"Process this message and return ONLY valid JSON:\n\n{raw_text}",
                 }
             ],
         )
-        response_text = message.content[0].text
-
-        # Extract JSON from response (handle markdown code blocks)
-        if "```json" in response_text:
-            response_text = response_text.split("```json")[1].split("```")[0]
-        elif "```" in response_text:
-            response_text = response_text.split("```")[1].split("```")[0]
-
-        try:
-            return json.loads(response_text.strip())
-        except json.JSONDecodeError:
-            logger.error("Failed to parse AI response: %s", response_text)
+        result = self._parse_json_response(message.content[0].text)
+        if result is None:
             return {
+                "message_type": "note",
                 "summary": raw_text[:200],
                 "tags": [],
                 "domain": "other",
-                "action_items": [],
+                "todos": [],
                 "related_keywords": [],
             }
+        # Normalize: ensure message_type always present
+        if "message_type" not in result:
+            result["message_type"] = "note"
+        return result
 
-    def enrich_note(self, note: Note) -> Note:
-        """Process a note with AI and fill in summary, tags, domain, action items."""
+    def _validate_tags(self, raw_tags: list[str]) -> list[str]:
+        """Validate and register tags, returning only valid ones."""
         from src.db.tag_registry import validate_tag
 
-        result = self.process_note(note.raw_text)
-        note.summary = result.get("summary", "")
-        note.action_items = result.get("action_items", [])
-
-        # Validate and normalize tags
-        raw_tags = result.get("tags", [])
-        validated_tags = []
+        validated = []
         for tag in raw_tags:
             try:
-                validated_tags.append(validate_tag(tag))
+                validated.append(validate_tag(tag))
             except ValueError:
                 logger.warning("AI produced invalid tag '%s', skipping", tag)
-        note.tags = validated_tags
+        if self.tag_registry and validated:
+            self.tag_registry.register_tags_from_note(validated)
+        return validated
 
-        # Register new tags and update usage counts
-        if self.tag_registry and validated_tags:
-            self.tag_registry.register_tags_from_note(validated_tags)
-
-        domain_str = result.get("domain", "other")
+    def _parse_domain(self, domain_str: str) -> LifeDomain:
         try:
-            note.domain = LifeDomain(domain_str)
+            return LifeDomain(domain_str)
         except ValueError:
-            note.domain = LifeDomain.OTHER
+            return LifeDomain.OTHER
 
+    def enrich_message(self, raw_text: str, source: str) -> dict:
+        """Classify a message and return structured result with note/todos/both.
+
+        Returns dict with keys:
+            message_type: "note" | "todo" | "note_with_todos"
+            note: Note | None  (populated for "note" and "note_with_todos")
+            todos: list[Todo]  (populated for "todo" and "note_with_todos")
+        """
+        from src.db.models import NoteSource
+
+        result = self.process_message(raw_text)
+        msg_type_str = result.get("message_type", "note")
+        try:
+            msg_type = MessageType(msg_type_str)
+        except ValueError:
+            msg_type = MessageType.NOTE
+
+        note_source = NoteSource(source) if isinstance(source, str) else source
+        tags = self._validate_tags(result.get("tags", []))
+        domain = self._parse_domain(result.get("domain", "other"))
+
+        output: dict = {"message_type": msg_type, "note": None, "todos": []}
+
+        # Build Note for "note" and "note_with_todos"
+        if msg_type in (MessageType.NOTE, MessageType.NOTE_WITH_TODOS):
+            # Collect todo texts as action_items on the note for backwards compatibility
+            todo_texts = [t["text"] for t in result.get("todos", []) if isinstance(t, dict) and "text" in t]
+            output["note"] = Note(
+                source=note_source,
+                raw_text=raw_text,
+                summary=result.get("summary", ""),
+                tags=tags,
+                domain=domain,
+                action_items=todo_texts,
+            )
+
+        # Build Todo objects for "todo" and "note_with_todos"
+        if msg_type in (MessageType.TODO, MessageType.NOTE_WITH_TODOS):
+            raw_todos = result.get("todos", [])
+            for t in raw_todos:
+                if not isinstance(t, dict) or "text" not in t:
+                    continue
+                priority_str = t.get("priority", "medium")
+                try:
+                    priority = TodoPriority(priority_str)
+                except ValueError:
+                    priority = TodoPriority.MEDIUM
+                output["todos"].append(Todo(
+                    text=t["text"],
+                    priority=priority,
+                    domain=domain,
+                    tags=tags,
+                    source=note_source,
+                    due_date=t.get("due_date"),
+                ))
+
+        # Pure todo with no note — if AI returned a summary, ignore it (no note to save)
+        if msg_type == MessageType.TODO and not output["todos"]:
+            # Fallback: treat the whole message as a single todo
+            output["todos"].append(Todo(
+                text=raw_text,
+                priority=TodoPriority.MEDIUM,
+                domain=domain,
+                tags=tags,
+                source=note_source,
+            ))
+
+        return output
+
+    # Keep backwards-compatible method for API/direct callers
+    def enrich_note(self, note: Note) -> Note:
+        """Process a note with AI and fill in summary, tags, domain, action items."""
+        result = self.process_message(note.raw_text)
+        note.summary = result.get("summary", "")
+
+        # Collect action items from todos array (new format) or action_items (old format)
+        todos = result.get("todos", [])
+        if todos:
+            note.action_items = [t["text"] for t in todos if isinstance(t, dict) and "text" in t]
+        else:
+            note.action_items = result.get("action_items", [])
+
+        note.tags = self._validate_tags(result.get("tags", []))
+        note.domain = self._parse_domain(result.get("domain", "other"))
         return note
 
     def find_related_notes(self, note: Note, existing_notes: list[Note], limit: int = 5) -> list[int]:

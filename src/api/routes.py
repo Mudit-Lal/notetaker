@@ -19,11 +19,15 @@ from src.api.schemas import (
     TagsListResponse,
     TagTreeNode,
     TagTreeResponse,
+    TodoCreate,
+    TodoResponse,
+    TodosListResponse,
+    TodoUpdate,
     TokenRequest,
     TokenResponse,
 )
 from src.db.database import Database
-from src.db.models import APIUser, LifeDomain, Note
+from src.db.models import APIUser, LifeDomain, Note, Todo, TodoPriority, TodoStatus
 from src.db.tag_registry import TagRegistry
 
 router = APIRouter()
@@ -182,6 +186,105 @@ def delete_note(
     if not db.delete_note(note_id):
         raise HTTPException(status_code=404, detail="Note not found")
     return MessageResponse(message="Note deleted")
+
+
+# --- Todos ---
+
+
+@router.post("/todos", response_model=TodoResponse, status_code=201)
+def create_todo(
+    body: TodoCreate,
+    _user: str = Depends(get_current_user),
+    db: Database = Depends(get_db),
+):
+    from src.db.models import NoteSource
+
+    todo = Todo(
+        text=body.text,
+        priority=body.priority,
+        domain=body.domain or LifeDomain.OTHER,
+        tags=body.tags,
+        source=NoteSource.API,
+        due_date=body.due_date,
+    )
+    created = db.create_todo(todo)
+    return _todo_to_response(created)
+
+
+@router.get("/todos", response_model=TodosListResponse)
+def list_todos(
+    status: TodoStatus | None = None,
+    domain: LifeDomain | None = None,
+    limit: int = Query(default=50, le=200),
+    _user: str = Depends(get_current_user),
+    db: Database = Depends(get_db),
+):
+    todos = db.list_todos(status=status, domain=domain, limit=limit)
+    return TodosListResponse(todos=[_todo_to_response(t) for t in todos], total=len(todos))
+
+
+@router.get("/todos/{todo_id}", response_model=TodoResponse)
+def get_todo(
+    todo_id: int,
+    _user: str = Depends(get_current_user),
+    db: Database = Depends(get_db),
+):
+    todo = db.get_todo(todo_id)
+    if not todo:
+        raise HTTPException(status_code=404, detail="Todo not found")
+    return _todo_to_response(todo)
+
+
+@router.post("/todos/{todo_id}/complete", response_model=TodoResponse)
+def complete_todo(
+    todo_id: int,
+    _user: str = Depends(get_current_user),
+    db: Database = Depends(get_db),
+):
+    todo = db.complete_todo(todo_id)
+    if not todo:
+        raise HTTPException(status_code=404, detail="Todo not found")
+    return _todo_to_response(todo)
+
+
+@router.post("/todos/{todo_id}/uncomplete", response_model=TodoResponse)
+def uncomplete_todo(
+    todo_id: int,
+    _user: str = Depends(get_current_user),
+    db: Database = Depends(get_db),
+):
+    todo = db.uncomplete_todo(todo_id)
+    if not todo:
+        raise HTTPException(status_code=404, detail="Todo not found")
+    return _todo_to_response(todo)
+
+
+@router.delete("/todos/{todo_id}", response_model=MessageResponse)
+def delete_todo(
+    todo_id: int,
+    _user: str = Depends(get_current_user),
+    db: Database = Depends(get_db),
+):
+    if not db.delete_todo(todo_id):
+        raise HTTPException(status_code=404, detail="Todo not found")
+    return MessageResponse(message="Todo deleted")
+
+
+def _todo_to_response(todo: Todo) -> TodoResponse:
+    return TodoResponse(
+        id=todo.id,
+        text=todo.text,
+        status=todo.status,
+        priority=todo.priority,
+        domain=todo.domain,
+        tags=todo.tags,
+        source_note_id=todo.source_note_id,
+        source=todo.source,
+        due_date=todo.due_date,
+        created_at=todo.created_at,
+        updated_at=todo.updated_at,
+        completed_at=todo.completed_at,
+    )
 
 
 # --- Tags ---

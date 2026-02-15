@@ -97,9 +97,10 @@ def main():
         run_bot(db, ai, tag_registry)
     elif mode == "mcp":
         logger.info("Starting MCP server...")
-        from src.mcp.server import init_mcp_db, init_mcp_tag_registry, run_mcp_server
+        from src.mcp.server import init_mcp_ai, init_mcp_db, init_mcp_tag_registry, run_mcp_server
         init_mcp_db(db)
         init_mcp_tag_registry(tag_registry)
+        init_mcp_ai(ai)
         run_mcp_server()
     else:
         logger.info("Starting API server + Telegram bot...")
