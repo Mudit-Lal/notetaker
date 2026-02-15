@@ -1,7 +1,7 @@
 import logging
 from typing import TYPE_CHECKING
 
-from telegram import Update
+from telegram import BotCommand, Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -358,7 +358,7 @@ class NoteTakerBot:
 
     def build_app(self) -> Application:
         """Build and return the Telegram application."""
-        app = Application.builder().token(settings.telegram_bot_token).build()
+        app = Application.builder().token(settings.telegram_bot_token).post_init(self._post_init).build()
 
         app.add_handler(CommandHandler("start", self.start))
         app.add_handler(CommandHandler("recent", self.recent))
@@ -375,3 +375,19 @@ class NoteTakerBot:
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text))
 
         return app
+
+    @staticmethod
+    async def _post_init(application: Application) -> None:
+        """Register the bot command menu with Telegram on startup."""
+        await application.bot.set_my_commands([
+            BotCommand("recent", "Show recent notes"),
+            BotCommand("search", "Search your notes"),
+            BotCommand("todos", "Show pending to-dos"),
+            BotCommand("done", "Mark a to-do as done"),
+            BotCommand("undone", "Reopen a completed to-do"),
+            BotCommand("actions", "Show action items from notes"),
+            BotCommand("domains", "List notes by life area"),
+            BotCommand("note", "View a specific note"),
+            BotCommand("tags", "Browse tag hierarchy"),
+            BotCommand("tag", "Filter notes by tag"),
+        ])
