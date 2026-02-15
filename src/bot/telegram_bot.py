@@ -187,16 +187,28 @@ class NoteTakerBot:
                 f"✅ Transcribed — processing…\n\n<i>\"{preview}\"</i>",
                 parse_mode=ParseMode.HTML,
             )
-            await self._process_and_save(
-                raw_text, NoteSource.VOICE, status_msg,
-                update.message.message_id, voice.duration,
-            )
+
+            # Classify intent — voice message could be a question too
+            intent = self.ai.classify_intent(raw_text)
+
+            if intent["intent"] == "query":
+                await status_msg.edit_text(
+                    f"<i>\"{preview}\"</i>\n\nThinking…",
+                    parse_mode=ParseMode.HTML,
+                )
+                answer = self.ai.answer_query(intent["query_text"], raw_text)
+                await status_msg.edit_text(answer)
+            else:
+                await self._process_and_save(
+                    raw_text, NoteSource.VOICE, status_msg,
+                    update.message.message_id, voice.duration,
+                )
         except Exception as e:
             logger.exception("Error processing voice note")
             await status_msg.edit_text(f"Error processing voice note: {e}")
 
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle incoming text messages — intelligently routed as note, todo, or both."""
+        """Handle incoming text messages — classifies intent first, then routes."""
         raw_text = update.message.text
         if not raw_text or raw_text.startswith("/"):
             return
@@ -204,10 +216,20 @@ class NoteTakerBot:
         status_msg = await update.message.reply_text("Processing…")
 
         try:
-            await self._process_and_save(
-                raw_text, NoteSource.TEXT, status_msg,
-                update.message.message_id,
-            )
+            # Step 1: Classify intent — is the user saving content or asking a question?
+            intent = self.ai.classify_intent(raw_text)
+
+            if intent["intent"] == "query":
+                # Answer the question using existing notes/todos as context
+                await status_msg.edit_text("Thinking…")
+                answer = self.ai.answer_query(intent["query_text"], raw_text)
+                await status_msg.edit_text(answer)
+            else:
+                # Save as note/todo (existing flow)
+                await self._process_and_save(
+                    raw_text, NoteSource.TEXT, status_msg,
+                    update.message.message_id,
+                )
         except Exception as e:
             logger.exception("Error processing message")
             await status_msg.edit_text(f"Error: {e}")

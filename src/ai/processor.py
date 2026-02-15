@@ -69,6 +69,39 @@ TAG FORMAT RULES:
 Be precise. Don't invent information not in the note. Match the user's intent."""
 
 
+INTENT_SYSTEM_PROMPT = """You classify user messages to a personal note-taking bot.
+
+Determine the user's INTENT — are they giving you new information to save, or asking a question / requesting information?
+
+Return ONLY one of these JSON responses:
+{"intent": "save"} — The user is dictating a note, task, reminder, thought, or observation to be stored.
+{"intent": "query", "query_text": "<cleaned up version of what they want to know>"} — The user is asking a question, requesting a summary, or wants to retrieve/review existing information.
+
+Examples of "save":
+- "I need to call Bob tomorrow"
+- "Had a great meeting with the team today"
+- "Buy groceries and pick up laundry"
+- "Thinking about switching to a new framework for the project"
+
+Examples of "query":
+- "What's on my todo list?" → {"intent": "query", "query_text": "show pending todos"}
+- "Brief me on my tasks" → {"intent": "query", "query_text": "summarize pending todos with context"}
+- "What did I note about Kaizen?" → {"intent": "query", "query_text": "notes about Kaizen"}
+- "Any high priority tasks?" → {"intent": "query", "query_text": "high priority pending todos"}
+- "What's on my plate this week?" → {"intent": "query", "query_text": "summarize todos and recent activity"}
+- "Summarize my recent notes" → {"intent": "query", "query_text": "summarize recent notes"}
+
+Return ONLY valid JSON, nothing else."""
+
+QUERY_SYSTEM_PROMPT = """You are a personal assistant responding to a user's question about their notes and tasks.
+You have access to their current data below. Respond naturally and concisely — like a sharp executive assistant
+who knows everything that's going on. Use short, direct language.
+
+Keep your response under 300 words. Relate todos to their source notes where relevant.
+Highlight what's urgent or important. Don't repeat raw data verbatim — synthesize and summarize.
+Do NOT use markdown formatting — this is a Telegram message. Use plain text with line breaks for structure."""
+
+
 class AIProcessor:
     def __init__(
         self,
@@ -263,6 +296,87 @@ class AIProcessor:
             ))
 
         return output
+
+    def classify_intent(self, raw_text: str) -> dict:
+        """Determine if a message is new content to save or a query about existing data.
+
+        Returns dict with:
+            intent: "save" | "query"
+            query_text: str (only if intent is "query")
+        """
+        message = self.anthropic_client.messages.create(
+            model="claude-sonnet-4-5-20250929",
+            max_tokens=128,
+            system=INTENT_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": raw_text}],
+        )
+        result = self._parse_json_response(message.content[0].text)
+        if result and result.get("intent") == "query":
+            return {"intent": "query", "query_text": result.get("query_text", raw_text)}
+        return {"intent": "save"}
+
+    def answer_query(self, query_text: str, raw_user_message: str) -> str:
+        """Answer a user's question using their existing notes and todos as context."""
+        from src.db.models import TodoStatus
+
+        if not self.db:
+            return "I don't have access to your data right now."
+
+        # Gather context
+        pending_todos = self.db.list_todos(status=TodoStatus.PENDING, limit=30)
+        recent_notes = self.db.get_recent_notes(15)
+
+        context_parts: list[str] = []
+
+        if pending_todos:
+            todo_lines = []
+            for t in pending_todos:
+                prio = f" [{t.priority.value}]" if t.priority.value != "medium" else ""
+                due = f" (due: {t.due_date})" if t.due_date else ""
+                note_ref = f" [from note #{t.source_note_id}]" if t.source_note_id else ""
+                todo_lines.append(f"- T#{t.id}{prio} {t.text}{due}{note_ref}")
+            context_parts.append("PENDING TODOS:\n" + "\n".join(todo_lines))
+
+        if recent_notes:
+            note_lines = []
+            for n in recent_notes:
+                summary = n.summary or n.raw_text[:120]
+                note_lines.append(f"- Note #{n.id} [{n.domain.value}] ({n.created_at:%b %d}): {summary}")
+            context_parts.append("RECENT NOTES:\n" + "\n".join(note_lines))
+
+        # Search for anything specific the user might be asking about
+        search_results = []
+        if len(query_text.split()) >= 2:
+            try:
+                search_results = self.db.search_notes(query_text, limit=5)
+            except Exception:
+                pass  # FTS might fail on some queries
+
+        if search_results:
+            search_lines = []
+            for r in search_results:
+                n = r.note
+                search_lines.append(f"- Note #{n.id} [{n.domain.value}]: {n.summary or n.raw_text[:120]}")
+            context_parts.append("RELEVANT SEARCH RESULTS:\n" + "\n".join(search_lines))
+
+        full_context = "\n\n".join(context_parts) if context_parts else "No notes or todos found."
+
+        # Build profile context
+        profile_section = ""
+        profile = self.db.get_profile()
+        if profile:
+            profile_lines = [f"- {k.replace('_', ' ').title()}: {v}" for k, v in profile.items()]
+            profile_section = "\n\nUSER CONTEXT:\n" + "\n".join(profile_lines)
+
+        system = QUERY_SYSTEM_PROMPT + profile_section + "\n\nUSER'S DATA:\n" + full_context
+
+        message = self.anthropic_client.messages.create(
+            model="claude-sonnet-4-5-20250929",
+            max_tokens=1024,
+            system=system,
+            messages=[{"role": "user", "content": raw_user_message}],
+        )
+        return message.content[0].text.strip()
 
     # Keep backwards-compatible method for API/direct callers
     def enrich_note(self, note: Note) -> Note:
