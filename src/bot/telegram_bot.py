@@ -1,9 +1,12 @@
 import logging
+from html import escape
 from typing import TYPE_CHECKING
 
-from telegram import BotCommand, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -13,12 +16,20 @@ from telegram.ext import (
 from src.ai.processor import AIProcessor
 from src.config import settings
 from src.db.database import Database
-from src.db.models import MessageType, Note, NoteSource, TodoStatus
+from src.db.models import MessageType, Note, NoteSource, Todo, TodoStatus
 
 if TYPE_CHECKING:
     from src.db.tag_registry import TagRegistry
 
 logger = logging.getLogger(__name__)
+
+# Priority display helpers
+_PRIORITY_LABEL = {"high": "‼️ High", "medium": "", "low": "Low"}
+_PRIORITY_ICON = {"high": "🔴", "medium": "🔵", "low": "⚪"}
+
+
+def _prio_bullet(priority_value: str) -> str:
+    return _PRIORITY_ICON.get(priority_value, "🔵")
 
 
 class NoteTakerBot:
@@ -27,61 +38,94 @@ class NoteTakerBot:
         self.ai = ai
         self.tag_registry = tag_registry
 
-    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await update.message.reply_text(
-            "Hey! I'm your note-taking assistant.\n\n"
-            "Just send me a voice message or text — I'll figure out "
-            "if it's a note, a to-do, or both, and handle it accordingly.\n\n"
-            "Commands:\n"
-            "/recent - Show recent notes\n"
-            "/search <query> - Search your notes\n"
-            "/todos - Show pending to-dos\n"
-            "/done <id> - Mark a to-do as done\n"
-            "/undone <id> - Reopen a to-do\n"
-            "/actions - Show action items from notes\n"
-            "/domains - List notes by life area\n"
-            "/note <id> - View a specific note\n"
-            "/tags - Browse tag hierarchy\n"
-            "/tag <name> - Filter notes by tag"
-        )
+    # ── helpers ───────────────────────────────────────────────────────
 
-    def _format_note_response(self, note: Note, todos: list | None = None) -> str:
-        """Format a saved note (and optional todos) into a Telegram response."""
-        tags_str = " ".join(f"#{t}" for t in note.tags) if note.tags else "none"
-        related_str = (
-            ", ".join(f"#{rid}" for rid in note.related_note_ids)
-            if note.related_note_ids
-            else "none"
-        )
+    @staticmethod
+    def _todo_line(t: Todo, *, show_note_ref: bool = False) -> str:
+        """Render a single todo as an HTML line."""
+        bullet = _prio_bullet(t.priority.value)
+        text = escape(t.text)
+        parts = [f"{bullet} {text}"]
 
-        lines = [
-            f"Note #{note.id} saved!\n",
-            f"Summary: {note.summary}",
-            f"Domain: {note.domain.value}",
-            f"Tags: {tags_str}",
-            f"Related: {related_str}",
-        ]
+        meta: list[str] = []
+        if t.priority.value == "high":
+            meta.append("‼️ High")
+        if t.due_date:
+            meta.append(f"📅 {escape(t.due_date)}")
+        if show_note_ref and t.source_note_id:
+            meta.append(f"from note #{t.source_note_id}")
+
+        if meta:
+            parts.append(f"     <i>{' · '.join(meta)}</i>")
+
+        return "\n".join(parts)
+
+    @staticmethod
+    def _todos_keyboard(todos: list[Todo]) -> InlineKeyboardMarkup | None:
+        """Build inline keyboard with a 'Done' button for each todo."""
+        if not todos:
+            return None
+        buttons = []
+        for t in todos:
+            label = t.text if len(t.text) <= 30 else t.text[:28] + "…"
+            buttons.append(
+                [InlineKeyboardButton(f"✓  {label}", callback_data=f"todo_done:{t.id}")]
+            )
+        return InlineKeyboardMarkup(buttons)
+
+    # ── formatters ────────────────────────────────────────────────────
+
+    def _format_note_response(self, note: Note, todos: list[Todo] | None = None) -> str:
+        """Format a saved note (and optional todos) into an HTML Telegram response."""
+        summary = escape(note.summary) if note.summary else ""
+        domain = escape(note.domain.value.capitalize())
+
+        lines = [f"<b>📝 Note #{note.id} saved</b>"]
+
+        if summary:
+            lines.append(f"\n{summary}")
+
+        lines.append(f"\n<i>{domain}</i>")
+
+        if note.related_note_ids:
+            refs = ", ".join(f"#{rid}" for rid in note.related_note_ids)
+            lines.append(f"Related: {refs}")
 
         if todos:
-            lines.append("\nTo-dos created:")
+            lines.append("\n<b>To-dos created:</b>")
             for t in todos:
-                prio = f" [{t.priority.value}]" if t.priority.value != "medium" else ""
-                due = f" (due: {t.due_date})" if t.due_date else ""
-                lines.append(f"  T#{t.id}{prio} {t.text}{due}")
+                lines.append(self._todo_line(t))
 
         return "\n".join(lines)
 
-    def _format_todo_response(self, todos: list) -> str:
-        """Format saved todos (no note) into a Telegram response."""
-        lines = ["To-do saved!" if len(todos) == 1 else f"{len(todos)} to-dos saved!"]
+    def _format_todo_response(self, todos: list[Todo]) -> str:
+        """Format saved todos (no note) into an HTML Telegram response."""
+        header = "<b>✅ To-do saved!</b>" if len(todos) == 1 else f"<b>✅ {len(todos)} to-dos saved!</b>"
+        lines = [header, ""]
         for t in todos:
-            prio = f" [{t.priority.value}]" if t.priority.value != "medium" else ""
-            due = f" (due: {t.due_date})" if t.due_date else ""
-            tags_str = " ".join(f"#{tg}" for tg in t.tags) if t.tags else ""
-            lines.append(f"\nT#{t.id}{prio} {t.text}{due}")
-            if tags_str:
-                lines.append(f"  {tags_str}  [{t.domain.value}]")
+            lines.append(self._todo_line(t))
         return "\n".join(lines)
+
+    # ── commands ──────────────────────────────────────────────────────
+
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        text = (
+            "<b>Hey! I'm your note-taking assistant.</b>\n\n"
+            "Send me a voice message or text — I'll figure out "
+            "if it's a note, a to-do, or both.\n\n"
+            "<b>Commands</b>\n"
+            "/recent – Recent notes\n"
+            "/search – Search your notes\n"
+            "/todos – Pending to-dos\n"
+            "/done – Mark a to-do done\n"
+            "/undone – Reopen a to-do\n"
+            "/actions – Action items\n"
+            "/domains – Notes by life area\n"
+            "/note – View a specific note\n"
+            "/tags – Tag hierarchy\n"
+            "/tag – Filter by tag"
+        )
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
     async def _process_and_save(self, raw_text: str, source: NoteSource, status_msg, telegram_message_id: int, audio_duration: float | None = None) -> None:
         """Classify message, save note/todos/both, and respond."""
@@ -91,7 +135,7 @@ class NoteTakerBot:
         todos = result.get("todos", [])
 
         saved_note = None
-        saved_todos = []
+        saved_todos: list[Todo] = []
 
         # Save note if present
         if note:
@@ -121,12 +165,13 @@ class NoteTakerBot:
         else:
             response = "Saved!"
 
-        await status_msg.edit_text(response)
+        keyboard = self._todos_keyboard(saved_todos) if saved_todos else None
+        await status_msg.edit_text(response, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
     async def handle_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming voice messages."""
         voice = update.message.voice
-        status_msg = await update.message.reply_text("Transcribing your voice note...")
+        status_msg = await update.message.reply_text("🎙 Transcribing…")
 
         try:
             voice_file = await context.bot.get_file(voice.file_id)
@@ -137,7 +182,11 @@ class NoteTakerBot:
                 await status_msg.edit_text("Couldn't transcribe that. Try again?")
                 return
 
-            await status_msg.edit_text(f"Transcribed. Processing...\n\n\"{raw_text[:200]}\"")
+            preview = escape(raw_text[:200])
+            await status_msg.edit_text(
+                f"✅ Transcribed — processing…\n\n<i>\"{preview}\"</i>",
+                parse_mode=ParseMode.HTML,
+            )
             await self._process_and_save(
                 raw_text, NoteSource.VOICE, status_msg,
                 update.message.message_id, voice.duration,
@@ -152,7 +201,7 @@ class NoteTakerBot:
         if not raw_text or raw_text.startswith("/"):
             return
 
-        status_msg = await update.message.reply_text("Processing...")
+        status_msg = await update.message.reply_text("Processing…")
 
         try:
             await self._process_and_save(
@@ -164,29 +213,27 @@ class NoteTakerBot:
             await status_msg.edit_text(f"Error: {e}")
 
     async def todos_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Show pending to-dos."""
+        """Show pending to-dos with inline buttons to mark them done."""
         todos = self.db.list_todos(status=TodoStatus.PENDING)
         if not todos:
-            await update.message.reply_text("No pending to-dos. You're all caught up!")
+            await update.message.reply_text("No pending to-dos — you're all caught up! 🎉")
             return
 
-        lines = ["Pending to-dos:\n"]
+        lines = ["<b>📋 Pending to-dos</b>\n"]
         for t in todos:
-            prio = f" [{t.priority.value}]" if t.priority.value != "medium" else ""
-            due = f" (due: {t.due_date})" if t.due_date else ""
-            note_ref = f" (note #{t.source_note_id})" if t.source_note_id else ""
-            tags_str = " ".join(f"#{tg}" for tg in t.tags[:3]) if t.tags else ""
-            line = f"T#{t.id}{prio} {t.text}{due}{note_ref}"
-            if tags_str:
-                line += f"\n   {tags_str}"
-            lines.append(line)
+            lines.append(self._todo_line(t, show_note_ref=True))
 
-        await update.message.reply_text("\n\n".join(lines))
+        keyboard = self._todos_keyboard(todos)
+        await update.message.reply_text(
+            "\n\n".join(lines),
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard,
+        )
 
     async def done_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Mark a to-do as done."""
+        """Mark a to-do as done via /done <id>."""
         if not context.args:
-            await update.message.reply_text("Usage: /done <todo-id>")
+            await update.message.reply_text("Usage: /done &lt;todo-id&gt;", parse_mode=ParseMode.HTML)
             return
         try:
             todo_id = int(context.args[0])
@@ -198,12 +245,15 @@ class NoteTakerBot:
         if not todo:
             await update.message.reply_text(f"To-do T#{todo_id} not found.")
             return
-        await update.message.reply_text(f"Done! T#{todo.id} marked as completed.\n  {todo.text}")
+        await update.message.reply_text(
+            f"<b>✅ Done!</b>  <s>{escape(todo.text)}</s>",
+            parse_mode=ParseMode.HTML,
+        )
 
     async def undone_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Reopen a completed to-do."""
         if not context.args:
-            await update.message.reply_text("Usage: /undone <todo-id>")
+            await update.message.reply_text("Usage: /undone &lt;todo-id&gt;", parse_mode=ParseMode.HTML)
             return
         try:
             todo_id = int(context.args[0])
@@ -215,7 +265,49 @@ class NoteTakerBot:
         if not todo:
             await update.message.reply_text(f"To-do T#{todo_id} not found.")
             return
-        await update.message.reply_text(f"Reopened T#{todo.id}.\n  {todo.text}")
+        await update.message.reply_text(
+            f"<b>🔄 Reopened</b>  {escape(todo.text)}",
+            parse_mode=ParseMode.HTML,
+        )
+
+    async def callback_todo_done(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle inline keyboard tap to mark a todo as done."""
+        query = update.callback_query
+        await query.answer()  # acknowledge the tap immediately
+
+        data = query.data or ""
+        if not data.startswith("todo_done:"):
+            return
+
+        try:
+            todo_id = int(data.split(":")[1])
+        except (IndexError, ValueError):
+            return
+
+        todo = self.db.complete_todo(todo_id)
+        if not todo:
+            await query.answer("To-do not found.", show_alert=True)
+            return
+
+        # Re-fetch the pending list and rebuild the message
+        remaining = self.db.list_todos(status=TodoStatus.PENDING)
+
+        if remaining:
+            lines = ["<b>📋 Pending to-dos</b>\n"]
+            for t in remaining:
+                lines.append(self._todo_line(t, show_note_ref=True))
+            lines.append(f"\n<i>✅ \"{escape(todo.text)}\" — done!</i>")
+            keyboard = self._todos_keyboard(remaining)
+            await query.edit_message_text(
+                "\n\n".join(lines),
+                parse_mode=ParseMode.HTML,
+                reply_markup=keyboard,
+            )
+        else:
+            await query.edit_message_text(
+                f"<i>✅ \"{escape(todo.text)}\" — done!</i>\n\nAll to-dos completed! 🎉",
+                parse_mode=ParseMode.HTML,
+            )
 
     async def recent(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Show recent notes."""
@@ -224,33 +316,34 @@ class NoteTakerBot:
             await update.message.reply_text("No notes yet. Send me a voice or text message!")
             return
 
-        lines = []
+        lines = ["<b>📒 Recent notes</b>\n"]
         for n in notes:
-            tags = " ".join(f"#{t}" for t in n.tags[:3])
-            summary = n.summary or n.raw_text[:80]
-            lines.append(f"#{n.id} [{n.domain.value}] {summary}\n   {tags}")
+            summary = escape(n.summary or n.raw_text[:80])
+            domain = escape(n.domain.value.capitalize())
+            lines.append(f"<b>#{n.id}</b>  {summary}\n     <i>{domain}</i>")
 
-        await update.message.reply_text("Recent notes:\n\n" + "\n\n".join(lines))
+        await update.message.reply_text("\n\n".join(lines), parse_mode=ParseMode.HTML)
 
     async def search(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Search notes."""
         query = " ".join(context.args) if context.args else ""
         if not query:
-            await update.message.reply_text("Usage: /search <query>")
+            await update.message.reply_text("Usage: /search &lt;query&gt;", parse_mode=ParseMode.HTML)
             return
 
         results = self.db.search_notes(query, limit=10)
         if not results:
-            await update.message.reply_text(f"No notes matching '{query}'")
+            await update.message.reply_text(f"No notes matching <i>{escape(query)}</i>", parse_mode=ParseMode.HTML)
             return
 
-        lines = []
+        lines = [f"<b>🔍 Results for \"{escape(query)}\"</b>\n"]
         for r in results:
             n = r.note
-            summary = n.summary or n.raw_text[:80]
-            lines.append(f"#{n.id} [{n.domain.value}] {summary}")
+            summary = escape(n.summary or n.raw_text[:80])
+            domain = escape(n.domain.value.capitalize())
+            lines.append(f"<b>#{n.id}</b>  {summary}\n     <i>{domain}</i>")
 
-        await update.message.reply_text(f"Search results for '{query}':\n\n" + "\n\n".join(lines))
+        await update.message.reply_text("\n\n".join(lines), parse_mode=ParseMode.HTML)
 
     async def actions(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Show pending action items."""
@@ -259,26 +352,31 @@ class NoteTakerBot:
             await update.message.reply_text("No action items found.")
             return
 
-        lines = [f"- {item['action']} (note #{item['note_id']})" for item in items[:20]]
-        await update.message.reply_text("Action items:\n\n" + "\n".join(lines))
+        lines = ["<b>⚡ Action items</b>\n"]
+        for item in items[:20]:
+            action = escape(item["action"])
+            lines.append(f"• {action}  <i>(note #{item['note_id']})</i>")
+
+        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
     async def domains(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """List notes grouped by domain."""
         from src.db.models import LifeDomain
 
-        lines = []
+        lines = ["<b>🗂 Notes by domain</b>"]
         for domain in LifeDomain:
             notes = self.db.list_notes(domain=domain, limit=5)
             if notes:
-                lines.append(f"\n{domain.value.upper()} ({len(notes)} notes):")
+                lines.append(f"\n<b>{escape(domain.value.upper())}</b> ({len(notes)})")
                 for n in notes:
-                    lines.append(f"  #{n.id} {n.summary or n.raw_text[:60]}")
+                    summary = escape(n.summary or n.raw_text[:60])
+                    lines.append(f"  #{n.id}  {summary}")
 
-        if not lines:
+        if len(lines) == 1:
             await update.message.reply_text("No notes yet!")
             return
 
-        await update.message.reply_text("Notes by domain:" + "\n".join(lines))
+        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
     async def tags_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Show tag tree with usage counts."""
@@ -291,41 +389,50 @@ class NoteTakerBot:
             await update.message.reply_text("No tags yet. Send a note and tags will be created!")
             return
 
-        lines = []
+        lines = ["<b>🏷 Tag hierarchy</b>\n"]
         for tag in top_level:
             children = self.tag_registry.get_children(tag.name)
+            tag_name = escape(tag.name)
             if children:
-                kids_str = ", ".join(f"{c.name.split('/')[-1]}({c.usage_count})" for c in children)
-                lines.append(f"#{tag.name} ({tag.usage_count} uses)\n   {kids_str}")
+                kids_str = ", ".join(
+                    f"{escape(c.name.split('/')[-1])} ({c.usage_count})" for c in children
+                )
+                lines.append(f"<b>#{tag_name}</b> ({tag.usage_count})\n     {kids_str}")
             else:
-                lines.append(f"#{tag.name} ({tag.usage_count} uses)")
+                lines.append(f"<b>#{tag_name}</b> ({tag.usage_count})")
 
-        await update.message.reply_text("Tag hierarchy:\n\n" + "\n\n".join(lines))
+        await update.message.reply_text("\n\n".join(lines), parse_mode=ParseMode.HTML)
 
     async def tag_filter(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """List notes with a specific tag."""
         tag_name = " ".join(context.args) if context.args else ""
         if not tag_name:
-            await update.message.reply_text("Usage: /tag <tag-name>\nExample: /tag devalok/hiring")
+            await update.message.reply_text(
+                "Usage: /tag &lt;tag-name&gt;\nExample: /tag devalok/hiring",
+                parse_mode=ParseMode.HTML,
+            )
             return
 
         notes = self.db.list_notes(tag=tag_name.lower(), limit=10)
         if not notes:
-            await update.message.reply_text(f"No notes with tag '{tag_name}'")
+            await update.message.reply_text(
+                f"No notes with tag <i>{escape(tag_name)}</i>",
+                parse_mode=ParseMode.HTML,
+            )
             return
 
-        lines = []
+        lines = [f"<b>🏷 Notes tagged \"{escape(tag_name)}\"</b>\n"]
         for n in notes:
-            tags = " ".join(f"#{t}" for t in n.tags[:3])
-            summary = n.summary or n.raw_text[:80]
-            lines.append(f"#{n.id} [{n.domain.value}] {summary}\n   {tags}")
+            summary = escape(n.summary or n.raw_text[:80])
+            domain = escape(n.domain.value.capitalize())
+            lines.append(f"<b>#{n.id}</b>  {summary}\n     <i>{domain}</i>")
 
-        await update.message.reply_text(f"Notes tagged '{tag_name}':\n\n" + "\n\n".join(lines))
+        await update.message.reply_text("\n\n".join(lines), parse_mode=ParseMode.HTML)
 
     async def view_note(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """View a specific note by ID."""
         if not context.args:
-            await update.message.reply_text("Usage: /note <id>")
+            await update.message.reply_text("Usage: /note &lt;id&gt;", parse_mode=ParseMode.HTML)
             return
 
         try:
@@ -339,22 +446,34 @@ class NoteTakerBot:
             await update.message.reply_text(f"Note #{note_id} not found")
             return
 
-        tags = " ".join(f"#{t}" for t in note.tags) if note.tags else "none"
-        actions = "\n".join(f"  - {a}" for a in note.action_items) if note.action_items else "none"
-        related = ", ".join(f"#{r}" for r in note.related_note_ids) if note.related_note_ids else "none"
+        domain = escape(note.domain.value.capitalize())
+        source = escape(note.source.value.capitalize())
+        raw = escape(note.raw_text)
+        summary = escape(note.summary) if note.summary else ""
 
-        response = (
-            f"Note #{note.id}\n"
-            f"Source: {note.source.value}\n"
-            f"Domain: {note.domain.value}\n"
-            f"Created: {note.created_at}\n\n"
-            f"Text:\n{note.raw_text}\n\n"
-            f"Summary: {note.summary}\n"
-            f"Tags: {tags}\n"
-            f"Actions: {actions}\n"
-            f"Related: {related}"
-        )
-        await update.message.reply_text(response)
+        lines = [f"<b>📝 Note #{note.id}</b>"]
+        lines.append(f"<i>{source} · {domain}</i>")
+
+        if note.created_at:
+            lines.append(f"<i>{note.created_at:%b %d, %Y %H:%M}</i>")
+
+        lines.append(f"\n{raw}")
+
+        if summary:
+            lines.append(f"\n<b>Summary:</b> {summary}")
+
+        if note.action_items:
+            lines.append("\n<b>Action items:</b>")
+            for a in note.action_items:
+                lines.append(f"  • {escape(a)}")
+
+        if note.related_note_ids:
+            refs = ", ".join(f"#{r}" for r in note.related_note_ids)
+            lines.append(f"\n<b>Related:</b> {refs}")
+
+        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+    # ── app builder ───────────────────────────────────────────────────
 
     def build_app(self) -> Application:
         """Build and return the Telegram application."""
@@ -371,6 +490,7 @@ class NoteTakerBot:
         app.add_handler(CommandHandler("note", self.view_note))
         app.add_handler(CommandHandler("tags", self.tags_command))
         app.add_handler(CommandHandler("tag", self.tag_filter))
+        app.add_handler(CallbackQueryHandler(self.callback_todo_done, pattern=r"^todo_done:"))
         app.add_handler(MessageHandler(filters.VOICE, self.handle_voice))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text))
 
