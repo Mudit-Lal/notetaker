@@ -7,6 +7,7 @@ This allows Claude to directly interact with your notes as a tool:
 - Get action items
 - Browse by life domain
 - Browse and filter by hierarchical tags
+- View and update user profile context for smarter AI tagging
 """
 
 import logging
@@ -295,6 +296,72 @@ def list_notes_by_tag(tag: str, limit: int = 20) -> str:
         tags = ", ".join(n.tags) if n.tags else ""
         output.append(f"  #{n.id} [{n.domain.value}] {n.summary or n.raw_text[:100]} [{tags}]")
     return "\n".join(output)
+
+
+@mcp.tool()
+def get_user_profile() -> str:
+    """View the user's profile context that is used to personalize note tagging.
+    Shows all profile fields like bio, companies, projects, interests, etc.
+    This context is injected into the AI system prompt when processing notes.
+    """
+    db = _get_db()
+    profile = db.get_profile()
+    if not profile:
+        return (
+            "No user profile set yet. Use update_profile_field to add context.\n"
+            "Recommended keys:\n"
+            "- bio: A short personal/professional summary\n"
+            "- companies: Current companies/orgs and your roles\n"
+            "- current_projects: What you're actively working on\n"
+            "- interests: Topics and areas you care about\n"
+            "- key_people: Family, partner, key contacts the AI should recognize\n"
+            "- devalok_vocabulary: Sanskrit/internal terms used in notes\n"
+            "- clients: Client names so the AI can tag notes about them\n"
+            "- note_context: How you take notes, common topics, languages used\n"
+            "\nYou can also create any custom key."
+        )
+
+    output = ["User Profile:"]
+    for key, value in profile.items():
+        label = key.replace("_", " ").title()
+        output.append(f"\n{label}:\n  {value}")
+    return "\n".join(output)
+
+
+@mcp.tool()
+def update_profile_field(key: str, value: str) -> str:
+    """Update a field in the user's profile context. This context is injected into the AI
+    system prompt when processing notes, so richer context leads to better tagging.
+
+    Common keys: bio, companies, current_projects, interests, key_people,
+    devalok_vocabulary, clients, note_context. You can also use any custom key.
+
+    Args:
+        key: The profile field name (lowercase, underscores for spaces, e.g. "current_projects")
+        value: The content for this field
+    """
+    key = key.strip().lower().replace(" ", "_")
+    if not key:
+        return "Error: key cannot be empty."
+    if len(value) > 2000:
+        return "Error: value too long (max 2000 characters). Be concise."
+
+    db = _get_db()
+    db.set_profile_field(key, value)
+    return f"Profile field '{key}' updated successfully."
+
+
+@mcp.tool()
+def delete_profile_field(key: str) -> str:
+    """Remove a field from the user's profile context.
+
+    Args:
+        key: The profile field name to remove
+    """
+    db = _get_db()
+    if db.delete_profile_field(key.strip().lower()):
+        return f"Profile field '{key}' deleted."
+    return f"Profile field '{key}' not found."
 
 
 def run_mcp_server():

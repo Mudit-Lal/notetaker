@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import io
 import json
 import logging
@@ -10,6 +12,7 @@ from src.config import settings
 from src.db.models import LifeDomain, Note
 
 if TYPE_CHECKING:
+    from src.db.database import Database
     from src.db.tag_registry import TagRegistry
 
 logger = logging.getLogger(__name__)
@@ -17,9 +20,6 @@ logger = logging.getLogger(__name__)
 BASE_SYSTEM_PROMPT = """You are a personal note-taking assistant. You process voice and text notes
 from a user who takes DIVERSE notes across ALL areas of their life — work, personal, health,
 creative projects, finances, learning, social, and more.
-
-The user runs a company called Devalok and is the Founding First Officer (now advisory) of PIERA —
-the India Policy & Economy Research Club at Arizona State University, also helping ops in India.
 
 Your job is to analyze each note and return a JSON object with:
 - "summary": A concise 1-2 sentence summary of the note
@@ -41,9 +41,14 @@ Be precise. Don't invent information not in the note. Match the user's intent.""
 
 
 class AIProcessor:
-    def __init__(self, tag_registry: "TagRegistry | None" = None):
+    def __init__(
+        self,
+        db: Database | None = None,
+        tag_registry: TagRegistry | None = None,
+    ):
         self._openai: openai.OpenAI | None = None
         self._anthropic: anthropic.Anthropic | None = None
+        self.db = db
         self.tag_registry = tag_registry
 
     @property
@@ -59,12 +64,35 @@ class AIProcessor:
         return self._anthropic
 
     def _build_system_prompt(self) -> str:
-        """Build system prompt with current tag vocabulary injected."""
+        """Build system prompt with user profile and tag vocabulary injected."""
         prompt = BASE_SYSTEM_PROMPT
+
+        # Inject user profile context
+        if self.db:
+            profile = self.db.get_profile()
+            if profile:
+                profile_lines = []
+                key_order = [
+                    "bio", "companies", "current_projects", "interests",
+                    "key_people", "devalok_vocabulary", "clients", "note_context",
+                ]
+                for key in key_order:
+                    if key in profile:
+                        label = key.replace("_", " ").title()
+                        profile_lines.append(f"- {label}: {profile[key]}")
+                for key, value in profile.items():
+                    if key not in key_order:
+                        label = key.replace("_", " ").title()
+                        profile_lines.append(f"- {label}: {value}")
+                if profile_lines:
+                    prompt += "\n\nUSER CONTEXT:\n" + "\n".join(profile_lines)
+
+        # Inject tag vocabulary
         if self.tag_registry:
             tag_context = self.tag_registry.format_tag_context_for_ai()
             if tag_context:
                 prompt += f"\n\nEXISTING TAG VOCABULARY:\n{tag_context}"
+
         return prompt
 
     def transcribe_audio(self, audio_bytes: bytes, filename: str = "voice.ogg") -> str:

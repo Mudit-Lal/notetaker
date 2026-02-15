@@ -59,6 +59,12 @@ class Database:
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS user_profile (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
                 raw_text, summary, tags, content='notes', content_rowid='id'
             );
@@ -261,3 +267,38 @@ class Database:
             is_active=bool(row["is_active"]),
             created_at=datetime.fromisoformat(row["created_at"]),
         )
+
+    # --- User Profile ---
+
+    def get_profile(self) -> dict[str, str]:
+        """Return all profile entries as a dict."""
+        rows = self.conn.execute(
+            "SELECT key, value FROM user_profile ORDER BY key"
+        ).fetchall()
+        return {row["key"]: row["value"] for row in rows}
+
+    def get_profile_field(self, key: str) -> str | None:
+        """Return a single profile field value, or None."""
+        row = self.conn.execute(
+            "SELECT value FROM user_profile WHERE key = ?", (key,)
+        ).fetchone()
+        return row["value"] if row else None
+
+    def set_profile_field(self, key: str, value: str) -> None:
+        """Upsert a profile field."""
+        now = self._now()
+        self.conn.execute(
+            """INSERT INTO user_profile (key, value, updated_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = ?""",
+            (key, value, now, value, now),
+        )
+        self.conn.commit()
+
+    def delete_profile_field(self, key: str) -> bool:
+        """Delete a profile field. Returns True if it existed."""
+        cursor = self.conn.execute(
+            "DELETE FROM user_profile WHERE key = ?", (key,)
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0

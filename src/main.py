@@ -84,8 +84,8 @@ def main():
     tag_registry.seed_tags(SEED_TAGS)
     logger.info("Tag registry initialized with %d seed tags", len(SEED_TAGS))
 
-    # AI processor with tag awareness
-    ai = AIProcessor(tag_registry=tag_registry)
+    # AI processor with tag awareness and user profile context
+    ai = AIProcessor(db=db, tag_registry=tag_registry)
 
     mode = sys.argv[1] if len(sys.argv) > 1 else "all"
 

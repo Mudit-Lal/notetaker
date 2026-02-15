@@ -55,6 +55,12 @@ class Tag(BaseModel):
     updated_at: datetime | None = None
 
 
+class UserProfileEntry(BaseModel):
+    key: str
+    value: str
+    updated_at: datetime | None = None
+
+
 class APIUser(BaseModel):
     id: int | None = None
     username: str
