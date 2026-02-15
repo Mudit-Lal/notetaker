@@ -6,9 +6,9 @@ This allows Claude to directly interact with your notes as a tool:
 - List recent notes
 - Get action items
 - Browse by life domain
+- Browse and filter by hierarchical tags
 """
 
-import json
 import logging
 
 from mcp.server.fastmcp import FastMCP
@@ -16,18 +16,25 @@ from mcp.server.fastmcp import FastMCP
 from src.config import settings
 from src.db.database import Database
 from src.db.models import LifeDomain, Note, NoteSource
+from src.db.tag_registry import TagRegistry
 
 logger = logging.getLogger(__name__)
 
-mcp = FastMCP("notetaker", instructions="Personal voice & text note-taking system")
+mcp = FastMCP("notetaker", instructions="Personal voice & text note-taking system with hierarchical tags")
 
-# Module-level database reference — set via init_mcp_db()
+# Module-level references — set via init functions
 _db: Database | None = None
+_tag_registry: TagRegistry | None = None
 
 
 def init_mcp_db(db: Database) -> None:
     global _db
     _db = db
+
+
+def init_mcp_tag_registry(registry: TagRegistry) -> None:
+    global _tag_registry
+    _tag_registry = registry
 
 
 def _get_db() -> Database:
@@ -36,6 +43,10 @@ def _get_db() -> Database:
         db.connect()
         init_mcp_db(db)
     return _db
+
+
+def _get_tag_registry() -> TagRegistry | None:
+    return _tag_registry
 
 
 @mcp.tool()
@@ -127,7 +138,7 @@ def create_note(text: str, domain: str = "other", tags: str = "") -> str:
     Args:
         text: The note content
         domain: Life area — one of: work, personal, health, finance, creative, learning, social, other
-        tags: Comma-separated tags (e.g. "meeting,project-x,urgent")
+        tags: Comma-separated hierarchical tags (e.g. "devalok/hiring,work,urgent")
     """
     db = _get_db()
 
@@ -145,6 +156,12 @@ def create_note(text: str, domain: str = "other", tags: str = "") -> str:
         tags=tag_list,
     )
     note = db.create_note(note)
+
+    # Register tags in the vocabulary
+    registry = _get_tag_registry()
+    if registry and tag_list:
+        registry.register_tags_from_note(tag_list)
+
     return f"Note #{note.id} created in {note.domain.value} domain with tags: {tag_list}"
 
 
@@ -214,6 +231,65 @@ def get_notes_summary() -> str:
         f"Most recent:\n{recent_str or '  (none)'}\n\n"
         f"Pending action items: {len(actions)}"
     )
+
+
+@mcp.tool()
+def list_tags(parent: str = "") -> str:
+    """Browse the tag vocabulary. Shows all known tags organized hierarchically.
+
+    Args:
+        parent: Optional parent tag to filter by (e.g. "devalok" to see devalok sub-tags only)
+    """
+    registry = _get_tag_registry()
+    if not registry:
+        return "Tag registry not available."
+
+    if parent:
+        tags = registry.get_children(parent)
+        if not tags:
+            return f"No sub-tags under '{parent}'."
+        output = [f"Sub-tags of {parent}:"]
+        for t in tags:
+            leaf = t.name.split("/")[-1]
+            desc = f" — {t.description}" if t.description else ""
+            output.append(f"  {leaf} ({t.usage_count} uses){desc}")
+        return "\n".join(output)
+
+    # Show full tree
+    top_level = registry.get_top_level_tags()
+    if not top_level:
+        return "No tags registered yet."
+
+    output = ["Tag hierarchy:"]
+    for tag in top_level:
+        desc = f" — {tag.description}" if tag.description else ""
+        children = registry.get_children(tag.name)
+        if children:
+            kids = ", ".join(f"{c.name.split('/')[-1]}({c.usage_count})" for c in children)
+            output.append(f"  {tag.name}/ ({tag.usage_count} uses){desc}\n    {kids}")
+        else:
+            output.append(f"  {tag.name} ({tag.usage_count} uses){desc}")
+    return "\n".join(output)
+
+
+@mcp.tool()
+def list_notes_by_tag(tag: str, limit: int = 20) -> str:
+    """List notes filtered by a hierarchical tag. Use a top-level tag to match all its sub-tags too.
+
+    Args:
+        tag: Tag name (e.g. "devalok/hiring" for exact, or "devalok" for all devalok/* notes)
+        limit: Maximum results (default 20)
+    """
+    db = _get_db()
+    notes = db.list_notes(tag=tag, limit=limit)
+    if not notes:
+        return f"No notes with tag '{tag}'."
+
+    output = [f"Notes tagged '{tag}':"]
+    for n in notes:
+        tags = ", ".join(n.tags) if n.tags else ""
+        output.append(f"  #{n.id} [{n.domain.value}] {n.summary or n.raw_text[:100]} [{tags}]")
+    return "\n".join(output)
 
 
 def run_mcp_server():

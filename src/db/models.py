@@ -44,6 +44,17 @@ class NoteSearchResult(BaseModel):
     snippet: str = ""
 
 
+class Tag(BaseModel):
+    id: int | None = None
+    name: str  # full slash path: "devalok/hiring"
+    parent: str | None = None  # "devalok" or None for top-level
+    description: str = ""
+    auto_created: bool = False
+    usage_count: int = 0
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
 class APIUser(BaseModel):
     id: int | None = None
     username: str

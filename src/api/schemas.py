@@ -65,5 +65,29 @@ class RegisterRequest(BaseModel):
     password: str = Field(..., min_length=8, max_length=128)
 
 
+class TagResponse(BaseModel):
+    name: str
+    parent: str | None
+    description: str
+    auto_created: bool
+    usage_count: int
+
+
+class TagsListResponse(BaseModel):
+    tags: list[TagResponse]
+    total: int
+
+
+class TagTreeNode(BaseModel):
+    name: str
+    description: str
+    usage_count: int
+    children: list["TagTreeNode"] = []
+
+
+class TagTreeResponse(BaseModel):
+    tree: list[TagTreeNode]
+
+
 class MessageResponse(BaseModel):
     message: str

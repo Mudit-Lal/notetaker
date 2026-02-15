@@ -15,16 +15,22 @@ from src.api.schemas import (
     NotesListResponse,
     NoteUpdate,
     RegisterRequest,
+    TagResponse,
+    TagsListResponse,
+    TagTreeNode,
+    TagTreeResponse,
     TokenRequest,
     TokenResponse,
 )
 from src.db.database import Database
 from src.db.models import APIUser, LifeDomain, Note
+from src.db.tag_registry import TagRegistry
 
 router = APIRouter()
 
-# Database dependency — initialized at app startup
+# Dependencies — initialized at app startup
 _db: Database | None = None
+_tag_registry: TagRegistry | None = None
 
 
 def get_db() -> Database:
@@ -36,6 +42,17 @@ def get_db() -> Database:
 def set_db(db: Database) -> None:
     global _db
     _db = db
+
+
+def get_tag_registry() -> TagRegistry:
+    if _tag_registry is None:
+        raise HTTPException(status_code=500, detail="Tag registry not initialized")
+    return _tag_registry
+
+
+def set_tag_registry(registry: TagRegistry) -> None:
+    global _tag_registry
+    _tag_registry = registry
 
 
 # --- Auth ---
@@ -165,6 +182,61 @@ def delete_note(
     if not db.delete_note(note_id):
         raise HTTPException(status_code=404, detail="Note not found")
     return MessageResponse(message="Note deleted")
+
+
+# --- Tags ---
+
+
+@router.get("/tags", response_model=TagsListResponse)
+def list_tags(
+    parent: str | None = None,
+    _user: str = Depends(get_current_user),
+    registry: TagRegistry = Depends(get_tag_registry),
+):
+    if parent:
+        tags = registry.get_children(parent)
+    else:
+        tags = registry.get_all_tags()
+    return TagsListResponse(
+        tags=[
+            TagResponse(
+                name=t.name,
+                parent=t.parent,
+                description=t.description,
+                auto_created=t.auto_created,
+                usage_count=t.usage_count,
+            )
+            for t in tags
+        ],
+        total=len(tags),
+    )
+
+
+@router.get("/tags/tree", response_model=TagTreeResponse)
+def get_tag_tree(
+    _user: str = Depends(get_current_user),
+    registry: TagRegistry = Depends(get_tag_registry),
+):
+    top_level = registry.get_top_level_tags()
+    tree = []
+    for tag in top_level:
+        children = registry.get_children(tag.name)
+        tree.append(
+            TagTreeNode(
+                name=tag.name,
+                description=tag.description,
+                usage_count=tag.usage_count,
+                children=[
+                    TagTreeNode(
+                        name=c.name,
+                        description=c.description,
+                        usage_count=c.usage_count,
+                    )
+                    for c in children
+                ],
+            )
+        )
+    return TagTreeResponse(tree=tree)
 
 
 @router.get("/health")

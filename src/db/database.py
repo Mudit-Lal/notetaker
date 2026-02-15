@@ -180,8 +180,15 @@ class Database:
             query += " AND domain = ?"
             params.append(domain.value)
         if tag:
-            query += " AND tags LIKE ?"
-            params.append(f'%"{tag}"%')
+            if "/" in tag:
+                # Specific sub-tag: exact match only
+                query += " AND tags LIKE ?"
+                params.append(f'%"{tag}"%')
+            else:
+                # Top-level tag: match exact + all children (e.g. "devalok" matches "devalok/hiring")
+                query += " AND (tags LIKE ? OR tags LIKE ?)"
+                params.append(f'%"{tag}"%')
+                params.append(f'%"{tag}/%')
 
         query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])

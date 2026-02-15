@@ -1,4 +1,5 @@
 import logging
+from typing import TYPE_CHECKING
 
 from telegram import Update
 from telegram.ext import (
@@ -14,13 +15,17 @@ from src.config import settings
 from src.db.database import Database
 from src.db.models import Note, NoteSource
 
+if TYPE_CHECKING:
+    from src.db.tag_registry import TagRegistry
+
 logger = logging.getLogger(__name__)
 
 
 class NoteTakerBot:
-    def __init__(self, db: Database, ai: AIProcessor):
+    def __init__(self, db: Database, ai: AIProcessor, tag_registry: "TagRegistry | None" = None):
         self.db = db
         self.ai = ai
+        self.tag_registry = tag_registry
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
@@ -32,7 +37,9 @@ class NoteTakerBot:
             "/search <query> - Search your notes\n"
             "/actions - Show pending action items\n"
             "/domains - List notes by life area\n"
-            "/note <id> - View a specific note"
+            "/note <id> - View a specific note\n"
+            "/tags - Browse tag hierarchy\n"
+            "/tag <name> - Filter notes by tag"
         )
 
     async def handle_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -192,6 +199,48 @@ class NoteTakerBot:
 
         await update.message.reply_text("Notes by domain:" + "\n".join(lines))
 
+    async def tags_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show tag tree with usage counts."""
+        if not self.tag_registry:
+            await update.message.reply_text("Tag registry not available.")
+            return
+
+        top_level = self.tag_registry.get_top_level_tags()
+        if not top_level:
+            await update.message.reply_text("No tags yet. Send a note and tags will be created!")
+            return
+
+        lines = []
+        for tag in top_level:
+            children = self.tag_registry.get_children(tag.name)
+            if children:
+                kids_str = ", ".join(f"{c.name.split('/')[-1]}({c.usage_count})" for c in children)
+                lines.append(f"#{tag.name} ({tag.usage_count} uses)\n   {kids_str}")
+            else:
+                lines.append(f"#{tag.name} ({tag.usage_count} uses)")
+
+        await update.message.reply_text("Tag hierarchy:\n\n" + "\n\n".join(lines))
+
+    async def tag_filter(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """List notes with a specific tag."""
+        tag_name = " ".join(context.args) if context.args else ""
+        if not tag_name:
+            await update.message.reply_text("Usage: /tag <tag-name>\nExample: /tag devalok/hiring")
+            return
+
+        notes = self.db.list_notes(tag=tag_name.lower(), limit=10)
+        if not notes:
+            await update.message.reply_text(f"No notes with tag '{tag_name}'")
+            return
+
+        lines = []
+        for n in notes:
+            tags = " ".join(f"#{t}" for t in n.tags[:3])
+            summary = n.summary or n.raw_text[:80]
+            lines.append(f"#{n.id} [{n.domain.value}] {summary}\n   {tags}")
+
+        await update.message.reply_text(f"Notes tagged '{tag_name}':\n\n" + "\n\n".join(lines))
+
     async def view_note(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """View a specific note by ID."""
         if not context.args:
@@ -236,6 +285,8 @@ class NoteTakerBot:
         app.add_handler(CommandHandler("actions", self.actions))
         app.add_handler(CommandHandler("domains", self.domains))
         app.add_handler(CommandHandler("note", self.view_note))
+        app.add_handler(CommandHandler("tags", self.tags_command))
+        app.add_handler(CommandHandler("tag", self.tag_filter))
         app.add_handler(MessageHandler(filters.VOICE, self.handle_voice))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text))
 

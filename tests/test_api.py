@@ -4,8 +4,9 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from src.api.routes import set_db
 from src.db.database import Database
+from src.db.seed_tags import SEED_TAGS
+from src.db.tag_registry import TagRegistry
 from src.main import create_api
 
 
@@ -14,7 +15,10 @@ def client():
     with tempfile.TemporaryDirectory() as tmpdir:
         db = Database(Path(tmpdir) / "test.db")
         db.connect()
-        app = create_api(db)
+        tag_registry = TagRegistry(db.conn)
+        tag_registry.ensure_tables()
+        tag_registry.seed_tags(SEED_TAGS)
+        app = create_api(db, tag_registry)
         with TestClient(app) as c:
             yield c
         db.close()
@@ -141,3 +145,46 @@ class TestNotes:
         resp = auth_client.get("/api/v1/notes/actions")
         assert resp.status_code == 200
         assert len(resp.json()) == 2
+
+
+class TestTags:
+    def test_list_all_tags(self, auth_client):
+        resp = auth_client.get("/api/v1/tags")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == len(SEED_TAGS)
+        tag_names = [t["name"] for t in data["tags"]]
+        assert "devalok" in tag_names
+        assert "piera" in tag_names
+        assert "devalok/hiring" in tag_names
+
+    def test_list_tags_by_parent(self, auth_client):
+        resp = auth_client.get("/api/v1/tags", params={"parent": "devalok"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] > 0
+        for tag in data["tags"]:
+            assert tag["parent"] == "devalok"
+
+    def test_tag_tree(self, auth_client):
+        resp = auth_client.get("/api/v1/tags/tree")
+        assert resp.status_code == 200
+        tree = resp.json()["tree"]
+        assert len(tree) > 0
+
+        # Find devalok in tree
+        devalok = next((t for t in tree if t["name"] == "devalok"), None)
+        assert devalok is not None
+        assert len(devalok["children"]) > 0
+        child_names = [c["name"] for c in devalok["children"]]
+        assert "devalok/hiring" in child_names
+
+    def test_tag_tree_piera(self, auth_client):
+        resp = auth_client.get("/api/v1/tags/tree")
+        tree = resp.json()["tree"]
+
+        piera = next((t for t in tree if t["name"] == "piera"), None)
+        assert piera is not None
+        child_names = [c["name"] for c in piera["children"]]
+        assert "piera/events" in child_names
+        assert "piera/ops-india" in child_names
