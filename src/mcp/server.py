@@ -20,7 +20,12 @@ from src.db.tag_registry import TagRegistry
 
 logger = logging.getLogger(__name__)
 
-mcp = FastMCP("notetaker", instructions="Personal voice & text note-taking system with hierarchical tags")
+mcp = FastMCP(
+    "notetaker",
+    instructions="Personal voice & text note-taking system with hierarchical tags",
+    host=settings.mcp_host,
+    port=settings.mcp_port,
+)
 
 # Module-level references — set via init functions
 _db: Database | None = None
@@ -302,7 +307,7 @@ def run_mcp_server():
     transport = settings.mcp_transport.lower()
     if transport == "sse":
         logger.info("MCP server starting with SSE transport on %s:%s", settings.mcp_host, settings.mcp_port)
-        mcp.run(transport="sse", host=settings.mcp_host, port=settings.mcp_port)
+        mcp.run(transport="sse")
     else:
         logger.info("MCP server starting with stdio transport")
         mcp.run()
