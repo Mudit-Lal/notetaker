@@ -3,7 +3,7 @@
     "notetaker": {
       "command": "python",
       "args": ["-m", "src.main", "mcp"],
-      "cwd": "/path/to/notetaker",
+      "cwd": "/home/user/notetaker",
       "env": {
         "DATABASE_PATH": "data/notetaker.db"
       }

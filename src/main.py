@@ -42,7 +42,11 @@ def create_api(db: Database, tag_registry: TagRegistry) -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # Lock this down in production
+        allow_origins=[
+            "https://notes.muditlal.com",
+            "http://localhost:3000",
+            "http://localhost:8000",
+        ],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

@@ -165,32 +165,33 @@ Now open Telegram and send `/start` to your bot — it should respond!
 
 ## 6. Set Up Nginx Reverse Proxy + SSL
 
-This gives you HTTPS access to the REST API at `https://notes.yourdomain.com`.
+This gives you HTTPS access to the REST API at `https://notes.muditlal.com`.
 
-Create the nginx config:
+### DNS Setup
+
+Point your domain to the server. Add an **A record** in your DNS provider:
+
+| Type | Name | Value |
+|------|------|-------|
+| A | notes | YOUR_SERVER_IP |
+
+Wait a few minutes for DNS propagation, then verify:
+
+```bash
+dig notes.muditlal.com +short
+# Should return your server's IP
+```
+
+### Nginx Config
+
+An nginx config is included in the repo at `deploy/nginx/notetaker.conf`. Copy it to the server:
 
 ```bash
 # Switch back to root
 exit
 
-nano /etc/nginx/sites-available/notetaker
-```
-
-Paste:
-
-```nginx
-server {
-    listen 80;
-    server_name notes.yourdomain.com;
-
-    location / {
-        proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
+# Copy the included config
+cp /home/notetaker/notetaker/deploy/nginx/notetaker.conf /etc/nginx/sites-available/notetaker
 ```
 
 Enable and get SSL:
@@ -199,11 +200,18 @@ Enable and get SSL:
 ln -s /etc/nginx/sites-available/notetaker /etc/nginx/sites-enabled/
 nginx -t && systemctl reload nginx
 
-# Get free SSL certificate
-certbot --nginx -d notes.yourdomain.com
+# Get free SSL certificate (auto-configures HTTPS)
+certbot --nginx -d notes.muditlal.com
 ```
 
-**Note:** You need a domain name pointed at your server's IP for this step. If you don't have one yet, the API is still accessible at `http://YOUR_SERVER_IP:8000`.
+Verify it works:
+
+```bash
+curl https://notes.muditlal.com/api/v1/health
+# Should return: {"status":"ok"}
+```
+
+**Note:** If you don't have the domain pointed yet, the API is still accessible at `http://YOUR_SERVER_IP:8000`.
 
 ## 7. Register an API User
 
