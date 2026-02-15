@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "notetaker": {
+      "command": "python",
+      "args": ["-m", "src.main", "mcp"],
+      "cwd": "/path/to/notetaker",
+      "env": {
+        "DATABASE_PATH": "data/notetaker.db"
+      }
+    }
+  }
+}
