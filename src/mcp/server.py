@@ -293,5 +293,16 @@ def list_notes_by_tag(tag: str, limit: int = 20) -> str:
 
 
 def run_mcp_server():
-    """Run the MCP server (stdio transport for Claude Desktop/CLI)."""
-    mcp.run()
+    """Run the MCP server.
+
+    Transport is controlled by MCP_TRANSPORT env var:
+      - "stdio" (default): for local / piped connections
+      - "sse": for remote HTTP connections (e.g. Claude Desktop over network)
+    """
+    transport = settings.mcp_transport.lower()
+    if transport == "sse":
+        logger.info("MCP server starting with SSE transport on %s:%s", settings.mcp_host, settings.mcp_port)
+        mcp.run(transport="sse", host=settings.mcp_host, port=settings.mcp_port)
+    else:
+        logger.info("MCP server starting with stdio transport")
+        mcp.run()

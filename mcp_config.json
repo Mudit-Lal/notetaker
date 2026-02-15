@@ -1,12 +1,7 @@
 {
   "mcpServers": {
     "notetaker": {
-      "command": "python",
-      "args": ["-m", "src.main", "mcp"],
-      "cwd": "/home/user/notetaker",
-      "env": {
-        "DATABASE_PATH": "data/notetaker.db"
-      }
+      "url": "http://YOUR_VPS_IP:8080/sse"
     }
   }
 }

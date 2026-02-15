@@ -8,15 +8,19 @@ services:
       - notetaker-data:/app/data
     restart: unless-stopped
 
-  # Run MCP server separately if needed
+  # MCP server over SSE — always running, accessible via HTTP
   mcp:
     build: .
     env_file: .env
+    environment:
+      - MCP_TRANSPORT=sse
+      - MCP_PORT=8080
+    ports:
+      - "8080:8080"
     volumes:
       - notetaker-data:/app/data
     command: ["python", "-m", "src.main", "mcp"]
-    profiles:
-      - mcp
+    restart: unless-stopped
 
 volumes:
   notetaker-data:

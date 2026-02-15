@@ -233,21 +233,47 @@ curl -X POST http://localhost:8000/api/v1/notes \
 
 ## 8. MCP Server Setup (for Claude Desktop / Claude Code)
 
-Add this to your Claude MCP settings (`~/.claude/mcp.json` or Claude Desktop settings):
+The MCP server runs as a persistent SSE service alongside the main app. After `docker compose up -d`, it's available on port 8080.
+
+### Allow MCP port through the firewall
+
+```bash
+ufw allow 8080/tcp
+```
+
+### Claude Desktop config
+
+Add this to your Claude Desktop MCP settings (Settings > Developer > Edit Config):
 
 ```json
 {
   "mcpServers": {
     "notetaker": {
-      "command": "docker",
-      "args": ["compose", "-f", "/home/notetaker/notetaker/docker-compose.yml", "run", "--rm", "mcp"],
-      "env": {}
+      "url": "http://YOUR_VPS_IP:8080/sse"
     }
   }
 }
 ```
 
-Or if running locally (not in Docker):
+Replace `YOUR_VPS_IP` with your server's IP address (e.g. `http://64.227.172.247:8080/sse`).
+
+### Claude Code config (`~/.claude/mcp.json`)
+
+Same format:
+
+```json
+{
+  "mcpServers": {
+    "notetaker": {
+      "url": "http://YOUR_VPS_IP:8080/sse"
+    }
+  }
+}
+```
+
+### Local development (stdio transport)
+
+For local use without Docker, the MCP server defaults to stdio transport:
 
 ```json
 {

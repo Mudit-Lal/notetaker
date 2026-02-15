@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8000
 
+    # MCP
+    mcp_transport: str = "stdio"  # "stdio" or "sse"
+    mcp_host: str = "0.0.0.0"
+    mcp_port: int = 8080
+
     @property
     def db_path(self) -> Path:
         path = Path(self.database_path)
