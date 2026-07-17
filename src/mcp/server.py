@@ -24,7 +24,29 @@ logger = logging.getLogger(__name__)
 
 mcp = FastMCP(
     "notetaker",
-    instructions="Personal voice & text note-taking system with hierarchical tags",
+    instructions=(
+        "This is a personal knowledge repository. Claude is the PRIMARY interface.\n\n"
+        "TOOL SELECTION GUIDE:\n"
+        "- save_message: Use for any new content (notes, tasks, or both). AI auto-classifies.\n"
+        "- create_note / create_todo: Use when you want explicit control over domain/tags (skips AI).\n"
+        "- search_notes: Use for keyword search. Try this before get_recent_notes for specific queries.\n"
+        "- get_note: Use to read a full note including its linked to-dos.\n"
+        "- get_notes_since: Use for time-based queries ('last week', 'today', 'past 3 days').\n"
+        "- update_note: Use to correct tags, domain, or summary on an existing note.\n"
+        "- delete_note: Permanent. Confirm with user before deleting.\n"
+        "- update_todo: Use to change text, priority, due date, domain, or tags of a to-do.\n"
+        "- list_todos: Default to status='pending'. Use domain filter to narrow scope.\n"
+        "- batch_complete_todos: Prefer over multiple complete_todo calls when completing several at once.\n"
+        "- get_todos_for_note: Use when you need a note's full context including its tasks.\n"
+        "- list_tags / list_notes_by_tag: Use for tag-based browsing and tag vocabulary exploration.\n"
+        "- get_notes_summary: Use for dashboard overviews. Avoid calling repeatedly.\n"
+        "- get_user_profile / update_profile_field: Read or enrich the user's profile context.\n\n"
+        "DATA MODEL:\n"
+        "- Notes: immutable raw text with AI-generated summary/tags/domain. IDs prefixed #.\n"
+        "- Todos: mutable tasks with priority (high/medium/low), optional due_date, optional source_note_id. IDs prefixed T#.\n"
+        "- Domains: work, personal, health, finance, creative, learning, social, other.\n"
+        "- Tags: hierarchical, max 2 levels (e.g. 'devalok/hiring'). Use list_tags to see vocabulary."
+    ),
     host=settings.mcp_host,
     port=settings.mcp_port,
 )
@@ -134,6 +156,18 @@ def get_note(note_id: int) -> str:
     actions = "\n  ".join(f"- {a}" for a in note.action_items) if note.action_items else "none"
     related = ", ".join(f"#{r}" for r in note.related_note_ids) if note.related_note_ids else "none"
 
+    todos = db.get_todos_for_note(note_id)
+    if todos:
+        todo_lines = []
+        for t in todos:
+            prio = f" [{t.priority.value}]" if t.priority.value != "medium" else ""
+            due = f" (due: {t.due_date})" if t.due_date else ""
+            check = "x" if t.status == TodoStatus.COMPLETED else " "
+            todo_lines.append(f"  [{check}] T#{t.id}{prio} {t.text}{due}")
+        todos_str = "\n".join(todo_lines)
+    else:
+        todos_str = "none"
+
     return (
         f"Note #{note.id}\n"
         f"Source: {note.source.value}\n"
@@ -144,8 +178,56 @@ def get_note(note_id: int) -> str:
         f"Summary: {note.summary}\n"
         f"Tags: {tags}\n"
         f"Action items:\n  {actions}\n"
-        f"Related notes: {related}"
+        f"Related notes: {related}\n"
+        f"Linked to-dos:\n{todos_str}"
     )
+
+
+@mcp.tool()
+def get_todos_for_note(note_id: int) -> str:
+    """Get all to-dos that were extracted from or linked to a specific note.
+
+    Args:
+        note_id: The note ID to look up linked to-dos for
+    """
+    db = _get_db()
+    if not db.get_note(note_id):
+        return f"Note #{note_id} not found."
+    todos = db.get_todos_for_note(note_id)
+    if not todos:
+        return f"No to-dos linked to Note #{note_id}."
+    output = [f"To-dos for Note #{note_id}:"]
+    for t in todos:
+        prio = f" [{t.priority.value}]" if t.priority.value != "medium" else ""
+        due = f" (due: {t.due_date})" if t.due_date else ""
+        check = "x" if t.status == TodoStatus.COMPLETED else " "
+        output.append(f"  [{check}] T#{t.id}{prio} {t.text}{due}")
+    return "\n".join(output)
+
+
+@mcp.tool()
+def get_notes_since(days_ago: int, limit: int = 50) -> str:
+    """Get notes created in the last N days. Useful for daily and weekly reviews.
+
+    Args:
+        days_ago: Number of days to look back (e.g. 1 for today, 7 for last week)
+        limit: Maximum results to return (default 50)
+    """
+    if days_ago < 1:
+        return "days_ago must be at least 1."
+    db = _get_db()
+    notes = db.list_notes_since(days_ago, limit=limit)
+    if not notes:
+        return f"No notes in the last {days_ago} day(s)."
+    output = [f"Notes from the last {days_ago} day(s) ({len(notes)} found):"]
+    for n in notes:
+        tags = f" [{', '.join(n.tags)}]" if n.tags else ""
+        date_str = n.created_at.strftime("%b %d %H:%M") if n.created_at else ""
+        output.append(
+            f"  #{n.id} [{n.domain.value}] {date_str}\n"
+            f"    {n.summary or n.raw_text[:100]}{tags}"
+        )
+    return "\n\n".join(output)
 
 
 @mcp.tool()
@@ -179,6 +261,9 @@ def save_message(text: str) -> str:
         recent = db.get_recent_notes(50)
         note.related_note_ids = ai.find_related_notes(note, recent)
         saved_note = db.create_note(note)
+        registry = _get_tag_registry()
+        if registry and saved_note.tags:
+            registry.register_tags_from_note(saved_note.tags)
         tags_str = ", ".join(saved_note.tags) if saved_note.tags else "none"
         parts.append(
             f"Note #{saved_note.id} saved [{saved_note.domain.value}]\n"
@@ -237,6 +322,69 @@ def create_note(text: str, domain: str = "other", tags: str = "") -> str:
         registry.register_tags_from_note(tag_list)
 
     return f"Note #{note.id} created in {note.domain.value} domain with tags: {tag_list}"
+
+
+@mcp.tool()
+def delete_note(note_id: int) -> str:
+    """Permanently delete a note by ID. This cannot be undone.
+    Associated to-dos are NOT deleted — they remain as orphaned tasks.
+
+    Args:
+        note_id: The note ID number to delete
+    """
+    db = _get_db()
+    note = db.get_note(note_id)
+    if not note:
+        return f"Note #{note_id} not found."
+    preview = note.summary or note.raw_text[:80]
+    if db.delete_note(note_id):
+        return f'Note #{note_id} deleted: "{preview}"'
+    return f"Failed to delete Note #{note_id}."
+
+
+@mcp.tool()
+def update_note(note_id: int, summary: str = "", tags: str = "", domain: str = "") -> str:
+    """Edit a note's summary, tags, or domain. Only provided fields are changed.
+    The raw text is not editable (it's the source of truth — delete and recreate if needed).
+    Providing tags replaces all existing tags. To clear all tags, pass tags=",".
+
+    Args:
+        note_id: The note ID to update
+        summary: New summary text (leave empty to keep existing)
+        tags: Comma-separated tags, replaces all existing (leave empty to keep existing)
+        domain: New life domain (leave empty to keep existing)
+    """
+    db = _get_db()
+    note = db.get_note(note_id)
+    if not note:
+        return f"Note #{note_id} not found."
+
+    changed = []
+
+    if summary:
+        note.summary = summary
+        changed.append("summary")
+
+    if tags:
+        tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+        note.tags = tag_list
+        changed.append(f"tags={tag_list}")
+        registry = _get_tag_registry()
+        if registry and tag_list:
+            registry.register_tags_from_note(tag_list)
+
+    if domain:
+        try:
+            note.domain = LifeDomain(domain)
+            changed.append(f"domain={domain}")
+        except ValueError:
+            return f"Invalid domain '{domain}'. Use: work, personal, health, finance, creative, learning, social, other"
+
+    if not changed:
+        return "No changes provided. Pass at least one of: summary, tags, domain."
+
+    db.update_note(note)
+    return f"Note #{note_id} updated ({', '.join(changed)})."
 
 
 @mcp.tool()
@@ -329,7 +477,8 @@ def list_todos(status: str = "pending", domain: str = "", limit: int = 30) -> st
         note_ref = f" (from note #{t.source_note_id})" if t.source_note_id else ""
         check = "x" if t.status == TodoStatus.COMPLETED else " "
         tags_str = f" [{', '.join(t.tags)}]" if t.tags else ""
-        output.append(f"[{check}] T#{t.id}{prio} {t.text}{due}{note_ref}{tags_str}")
+        date_str = f" (created: {t.created_at.strftime('%b %d')})" if t.created_at else ""
+        output.append(f"[{check}] T#{t.id}{prio} {t.text}{due}{date_str}{note_ref}{tags_str}")
     return "\n".join(output)
 
 
@@ -375,6 +524,106 @@ def delete_todo(todo_id: int) -> str:
 
 
 @mcp.tool()
+def update_todo(
+    todo_id: int,
+    text: str = "",
+    priority: str = "",
+    domain: str = "",
+    tags: str = "",
+    due_date: str = "",
+) -> str:
+    """Edit a to-do's text, priority, domain, tags, or due date.
+    Only provided fields are changed. Pass due_date='none' to clear an existing due date.
+
+    Args:
+        todo_id: The to-do ID to update
+        text: New task description (leave empty to keep existing)
+        priority: New priority — "high", "medium", or "low" (leave empty to keep existing)
+        domain: New life domain (leave empty to keep existing)
+        tags: Comma-separated tags, replaces all existing (leave empty to keep existing)
+        due_date: New due date string, or "none" to clear (leave empty to keep existing)
+    """
+    db = _get_db()
+    todo = db.get_todo(todo_id)
+    if not todo:
+        return f"To-do T#{todo_id} not found."
+
+    changed = []
+
+    if text:
+        todo.text = text
+        changed.append("text")
+
+    if priority:
+        try:
+            todo.priority = TodoPriority(priority)
+            changed.append(f"priority={priority}")
+        except ValueError:
+            return f"Invalid priority '{priority}'. Use: high, medium, low"
+
+    if domain:
+        try:
+            todo.domain = LifeDomain(domain)
+            changed.append(f"domain={domain}")
+        except ValueError:
+            return f"Invalid domain '{domain}'. Use: work, personal, health, finance, creative, learning, social, other"
+
+    if tags:
+        tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+        todo.tags = tag_list
+        changed.append(f"tags={tag_list}")
+        registry = _get_tag_registry()
+        if registry and tag_list:
+            registry.register_tags_from_note(tag_list)
+
+    if due_date:
+        todo.due_date = None if due_date.lower() == "none" else due_date
+        changed.append("due_date")
+
+    if not changed:
+        return "No changes provided. Pass at least one of: text, priority, domain, tags, due_date."
+
+    updated = db.update_todo(todo)
+    if not updated:
+        return f"Failed to update T#{todo_id}."
+    return f"T#{todo_id} updated ({', '.join(changed)}): {updated.text}"
+
+
+@mcp.tool()
+def batch_complete_todos(todo_ids: str) -> str:
+    """Mark multiple to-dos as completed in one call.
+
+    Args:
+        todo_ids: Comma-separated list of to-do ID numbers (e.g. "3,7,12")
+    """
+    db = _get_db()
+    id_strings = [s.strip() for s in todo_ids.split(",") if s.strip()]
+    if not id_strings:
+        return "No to-do IDs provided."
+
+    results = []
+    errors = []
+    for id_str in id_strings:
+        try:
+            tid = int(id_str)
+        except ValueError:
+            errors.append(f"'{id_str}' is not a valid ID")
+            continue
+        todo = db.complete_todo(tid)
+        if todo:
+            results.append(f"  T#{todo.id}: {todo.text}")
+        else:
+            errors.append(f"T#{tid} not found")
+
+    output = []
+    if results:
+        output.append(f"Completed {len(results)} to-do(s):\n" + "\n".join(results))
+    if errors:
+        output.append("Errors:\n" + "\n".join(f"  {e}" for e in errors))
+    return "\n\n".join(output)
+
+
+@mcp.tool()
 def list_notes_by_domain(domain: str, limit: int = 20) -> str:
     """List notes filtered by life domain.
 
@@ -404,28 +653,29 @@ def get_notes_summary() -> str:
     """Get an overview of all notes and to-dos — counts by domain, recent activity, and pending tasks."""
     db = _get_db()
 
-    summary_parts = []
-    total = 0
-    for domain in LifeDomain:
-        notes = db.list_notes(domain=domain, limit=1000)
-        count = len(notes)
-        total += count
-        if count > 0:
-            summary_parts.append(f"  {domain.value}: {count} notes")
+    domain_counts = db.count_notes_by_domain()
+    total = sum(domain_counts.values())
+    domain_str = "\n".join(
+        f"  {d}: {c} notes" for d, c in sorted(domain_counts.items())
+    ) or "  (none)"
 
     recent = db.get_recent_notes(3)
     recent_str = "\n".join(
         f"  #{n.id} [{n.domain.value}] {n.summary or n.raw_text[:60]}" for n in recent
-    )
+    ) or "  (none)"
 
-    pending_todos = db.list_todos(status=TodoStatus.PENDING)
-    completed_todos = db.list_todos(status=TodoStatus.COMPLETED)
+    pending_count = db.conn.execute(
+        "SELECT COUNT(*) FROM todos WHERE status = 'pending'"
+    ).fetchone()[0]
+    completed_count = db.conn.execute(
+        "SELECT COUNT(*) FROM todos WHERE status = 'completed'"
+    ).fetchone()[0]
 
     return (
         f"Total notes: {total}\n\n"
-        f"By domain:\n{''.join(summary_parts) or '  (none)'}\n\n"
-        f"Most recent:\n{recent_str or '  (none)'}\n\n"
-        f"To-dos: {len(pending_todos)} pending, {len(completed_todos)} completed"
+        f"By domain:\n{domain_str}\n\n"
+        f"Most recent:\n{recent_str}\n\n"
+        f"To-dos: {pending_count} pending, {completed_count} completed"
     )
 
 

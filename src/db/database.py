@@ -1,6 +1,6 @@
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from src.db.models import APIUser, LifeDomain, Note, NoteSearchResult, NoteSource, Todo, TodoPriority, TodoStatus
@@ -247,6 +247,22 @@ class Database:
         ).fetchall()
         return [self._row_to_note(row) for row in rows]
 
+    def count_notes_by_domain(self) -> dict[str, int]:
+        """Return note counts grouped by domain using a single SQL aggregation."""
+        rows = self.conn.execute(
+            "SELECT domain, COUNT(*) as cnt FROM notes GROUP BY domain"
+        ).fetchall()
+        return {row["domain"]: row["cnt"] for row in rows}
+
+    def list_notes_since(self, days_ago: int, limit: int = 50) -> list[Note]:
+        """Return notes created within the last N days, newest first."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
+        rows = self.conn.execute(
+            "SELECT * FROM notes WHERE created_at >= ? ORDER BY created_at DESC LIMIT ?",
+            (cutoff, limit),
+        ).fetchall()
+        return [self._row_to_note(row) for row in rows]
+
     def get_notes_by_domain(self, domain: LifeDomain) -> list[Note]:
         return self.list_notes(domain=domain)
 
@@ -350,6 +366,26 @@ class Database:
         cursor = self.conn.execute("DELETE FROM todos WHERE id = ?", (todo_id,))
         self.conn.commit()
         return cursor.rowcount > 0
+
+    def update_todo(self, todo: Todo) -> Todo | None:
+        """Update mutable fields of an existing todo: text, priority, domain, tags, due_date.
+        Does not update status or completed_at — use complete_todo/uncomplete_todo for those."""
+        now = self._now()
+        self.conn.execute(
+            """UPDATE todos SET text=?, priority=?, domain=?, tags=?,
+               due_date=?, updated_at=? WHERE id=?""",
+            (
+                todo.text,
+                todo.priority.value,
+                todo.domain.value,
+                json.dumps(todo.tags),
+                todo.due_date,
+                now,
+                todo.id,
+            ),
+        )
+        self.conn.commit()
+        return self.get_todo(todo.id)
 
     def get_todos_for_note(self, note_id: int) -> list[Todo]:
         rows = self.conn.execute(

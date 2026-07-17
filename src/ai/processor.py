@@ -183,7 +183,7 @@ class AIProcessor:
     def process_message(self, raw_text: str) -> dict:
         """Use Claude to classify, summarize, tag, and extract todos from a message."""
         message = self.anthropic_client.messages.create(
-            model="claude-sonnet-4-5-20250929",
+            model="claude-sonnet-4-6",
             max_tokens=1024,
             system=self._build_system_prompt(),
             messages=[
@@ -305,7 +305,7 @@ class AIProcessor:
             query_text: str (only if intent is "query")
         """
         message = self.anthropic_client.messages.create(
-            model="claude-sonnet-4-5-20250929",
+            model="claude-sonnet-4-6",
             max_tokens=128,
             system=INTENT_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": raw_text}],
@@ -371,7 +371,7 @@ class AIProcessor:
         system = QUERY_SYSTEM_PROMPT + profile_section + "\n\nUSER'S DATA:\n" + full_context
 
         message = self.anthropic_client.messages.create(
-            model="claude-sonnet-4-5-20250929",
+            model="claude-sonnet-4-6",
             max_tokens=1024,
             system=system,
             messages=[{"role": "user", "content": raw_user_message}],
@@ -405,7 +405,7 @@ class AIProcessor:
         )
 
         message = self.anthropic_client.messages.create(
-            model="claude-sonnet-4-5-20250929",
+            model="claude-sonnet-4-6",
             max_tokens=256,
             messages=[
                 {

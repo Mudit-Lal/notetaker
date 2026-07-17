@@ -6,6 +6,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     # Telegram
     telegram_bot_token: str = ""
+    telegram_allowed_user_ids: str = ""  # Comma-separated Telegram user IDs. Empty = no restriction (insecure!).
 
     # OpenAI (Whisper)
     openai_api_key: str = ""
@@ -32,6 +33,13 @@ class Settings(BaseSettings):
     mcp_transport: str = "stdio"  # "stdio" or "sse"
     mcp_host: str = "0.0.0.0"
     mcp_port: int = 8080
+
+    @property
+    def allowed_telegram_user_ids(self) -> set[int]:
+        """Parsed set of allowed Telegram user IDs. Empty set means no restriction."""
+        if not self.telegram_allowed_user_ids.strip():
+            return set()
+        return {int(uid.strip()) for uid in self.telegram_allowed_user_ids.split(",") if uid.strip().isdigit()}
 
     @property
     def db_path(self) -> Path:
